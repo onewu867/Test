@@ -138,12 +138,19 @@ endif()
 # 详细使用文档请参考：cmake/README.md
 #
 # 快速参考：
-#   - setup_qt(target [WIN32] [NO_WIN32] [DEPLOY] [COMPONENTS ...])
+#   - setup_qt(target [WIN32] [NO_WIN32] [DEPLOY] [DEPLOY_FULL] [COMPONENTS ...])
 #   - 默认：隐藏控制台、仅复制 platforms 插件、自动查找 Qt6/Qt5
 #   - DEPLOY：自动打包所有依赖（windeployqt/macdeployqt/linuxdeployqt）
+#   - DEPLOY_FULL：完整打包模式，包含所有插件和翻译（适合发布）
 #   - compile_commands.json：使用 Ninja 生成器自动生成并同步
+#   - setup_package_directory：为多项目创建统一打包目录
+#   - setup_cpack：配置 CPack 自动生成安装包
 #
 # 更多信息请查看：cmake/README.md
+
+# ============================================================================
+# 打包辅助函数
+# ============================================================================
 
 # ----------------------------------------------------------------------------
 # 函数：复制 platforms 插件到目标目录（内部辅助函数）
@@ -159,6 +166,136 @@ function(_copy_platforms_plugin target plugin_path)
         \"$<TARGET_FILE_DIR:${target}>/platforms\"
     )
   endif()
+endfunction()
+
+# ----------------------------------------------------------------------------
+# 函数：复制 Qt 插件到目标目录（增强版）
+# ----------------------------------------------------------------------------
+# 功能：复制指定的 Qt 插件到目标运行目录
+# 参数：
+#   target - 目标名称
+#   plugin_categories - 插件类别列表（如 platforms imageformats iconengines styles）
+function(_copy_qt_plugins target plugin_categories)
+  # 获取 Qt 安装前缀
+  _get_qt_prefix_dir()
+  
+  if(NOT QT_PREFIX_DIR)
+    message(WARNING "未找到 Qt 安装路径，无法复制插件")
+    return()
+  endif()
+  
+  set(PLUGIN_BASE_PATH "${QT_PREFIX_DIR}/plugins")
+  
+  foreach(category IN LISTS plugin_categories)
+    set(PLUGIN_SOURCE "${PLUGIN_BASE_PATH}/${category}")
+    if(EXISTS "${PLUGIN_SOURCE}")
+      add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory \"$<TARGET_FILE_DIR:${target}>/${category}\"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+          \"${PLUGIN_SOURCE}\"
+          \"$<TARGET_FILE_DIR:${target}>/${category}\"
+        COMMENT "复制 Qt ${category} 插件"
+      )
+      message(STATUS "已配置复制 Qt ${category} 插件")
+    else()
+      message(WARNING "未找到 Qt ${category} 插件: ${PLUGIN_SOURCE}")
+    endif()
+  endforeach()
+endfunction()
+
+# ----------------------------------------------------------------------------
+# 函数：复制 Qt 依赖库（手动方式）
+# ----------------------------------------------------------------------------
+# 功能：手动复制必要的 Qt DLL 到目标运行目录（Windows 备用方案）
+# 参数：
+#   target - 目标名称
+#   qt_components - Qt 组件列表
+function(_copy_qt_dependencies target qt_components)
+  if(NOT WIN32)
+    return()
+  endif()
+  
+  # 获取 Qt 安装前缀
+  _get_qt_prefix_dir()
+  
+  if(NOT QT_PREFIX_DIR)
+    message(WARNING "未找到 Qt 安装路径，无法复制依赖库")
+    return()
+  endif()
+  
+  set(QT_BIN_DIR "${QT_PREFIX_DIR}/bin")
+  
+  # 基础依赖 DLL
+  set(CORE_DLLS
+    Qt${QT_VERSION_MAJOR}Core$<$<CONFIG:Debug>:d>.dll
+  )
+  
+  # 根据组件添加相应的 DLL
+  foreach(comp IN LISTS qt_components)
+    list(APPEND CORE_DLLS Qt${QT_VERSION_MAJOR}${comp}$<$<CONFIG:Debug>:d>.dll)
+  endforeach()
+  
+  # 复制 DLL
+  foreach(dll IN LISTS CORE_DLLS)
+    add_custom_command(TARGET ${target} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        \"${QT_BIN_DIR}/${dll}\"
+        \"$<TARGET_FILE_DIR:${target}>\"
+      COMMENT "复制 ${dll}"
+    )
+  endforeach()
+  
+  message(STATUS "已配置手动复制 Qt 依赖库（${qt_components}）")
+endfunction()
+
+# ----------------------------------------------------------------------------
+# 函数：生成 qt.conf 配置文件
+# ----------------------------------------------------------------------------
+# 功能：在可执行文件目录生成 qt.conf，指定插件和库的相对路径
+# 参数：target - 目标名称
+function(_generate_qt_conf target)
+  set(QT_CONF_CONTENT "[Paths]\nPlugins = .\nLibraries = .\n")
+  
+  add_custom_command(TARGET ${target} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E echo "[Paths]" > \"$<TARGET_FILE_DIR:${target}>/qt.conf\"
+    COMMAND ${CMAKE_COMMAND} -E echo "Plugins = ." >> \"$<TARGET_FILE_DIR:${target}>/qt.conf\"
+    COMMAND ${CMAKE_COMMAND} -E echo "Libraries = ." >> \"$<TARGET_FILE_DIR:${target}>/qt.conf\"
+    COMMENT "生成 qt.conf 配置文件"
+  )
+  
+  message(STATUS "已配置生成 qt.conf")
+endfunction()
+
+# ----------------------------------------------------------------------------
+# 函数：创建打包目录结构
+# ----------------------------------------------------------------------------
+# 功能：为多项目场景创建统一的打包目录结构
+# 参数：package_name - 打包名称（默认使用 PROJECT_NAME）
+function(setup_package_directory)
+  set(options)
+  set(oneValueArgs NAME)
+  set(multiValueArgs)
+  cmake_parse_arguments(PKG "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+  
+  if(NOT PKG_NAME)
+    set(PKG_NAME ${PROJECT_NAME})
+  endif()
+  
+  # 设置打包根目录
+  set(PACKAGE_ROOT_DIR "${CMAKE_BINARY_DIR}/package/${PKG_NAME}" CACHE PATH "打包根目录")
+  set(PACKAGE_BIN_DIR "${PACKAGE_ROOT_DIR}/bin" CACHE PATH "打包可执行文件目录")
+  set(PACKAGE_LIB_DIR "${PACKAGE_ROOT_DIR}/lib" CACHE PATH "打包库文件目录")
+  set(PACKAGE_PLUGIN_DIR "${PACKAGE_ROOT_DIR}/plugins" CACHE PATH "打包插件目录")
+  set(PACKAGE_DOC_DIR "${PACKAGE_ROOT_DIR}/docs" CACHE PATH "打包文档目录")
+  
+  # 创建目录
+  file(MAKE_DIRECTORY ${PACKAGE_ROOT_DIR})
+  file(MAKE_DIRECTORY ${PACKAGE_BIN_DIR})
+  file(MAKE_DIRECTORY ${PACKAGE_LIB_DIR})
+  file(MAKE_DIRECTORY ${PACKAGE_PLUGIN_DIR})
+  file(MAKE_DIRECTORY ${PACKAGE_DOC_DIR})
+  
+  message(STATUS "${_COLOR_GREEN}打包目录已创建:${_COLOR_RESET} ${PACKAGE_ROOT_DIR}")
 endfunction()
 
 # ----------------------------------------------------------------------------
@@ -212,12 +349,13 @@ endfunction()
 # 函数：统一查找并链接 Qt（支持 Qt6/Qt5，默认 Widgets）
 # ----------------------------------------------------------------------------
 # 用法：
-#   setup_qt(<target> [WIN32] [NO_WIN32] [DEPLOY] [COMPONENTS Widgets Gui Core ...])
+#   setup_qt(<target> [WIN32] [NO_WIN32] [DEPLOY] [DEPLOY_FULL] [COMPONENTS Widgets Gui Core ...])
 #
 # 参数：
 #   WIN32: 在 Windows 上隐藏控制台窗口（Windows 子系统，默认启用）
 #   NO_WIN32: 在 Windows 上显示控制台窗口（控制台应用）
 #   DEPLOY: 在 Windows 上自动运行 windeployqt 打包所有依赖（构建后）
+#   DEPLOY_FULL: 完整打包模式，包含所有插件和依赖（适合发布）
 #   COMPONENTS: Qt 组件列表，默认仅 Widgets
 #
 # 说明：
@@ -226,12 +364,13 @@ endfunction()
 # - 默认仅链接 Widgets，如需额外组件使用 COMPONENTS 传入
 # - Windows 上默认隐藏控制台（WIN32），如需显示控制台使用 NO_WIN32
 # - 使用 DEPLOY 选项可自动打包所有 Qt 依赖，无需手动配置 PATH
+# - 使用 DEPLOY_FULL 选项可进行完整打包，适合最终发布
 function(setup_qt target)
   if(NOT TARGET ${target})
     message(FATAL_ERROR "setup_qt: 目标 ${target} 未创建，请先 add_executable/add_library。")
   endif()
 
-  set(options WIN32 NO_WIN32 DEPLOY)
+  set(options WIN32 NO_WIN32 DEPLOY DEPLOY_FULL)
   set(oneValueArgs)
   set(multiValueArgs COMPONENTS)
   cmake_parse_arguments(QT "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
@@ -265,8 +404,10 @@ function(setup_qt target)
   # 显示使用模式
   if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     message(STATUS "${_COLOR_YELLOW}使用模式:${_COLOR_RESET} ${_COLOR_BOLD}单个项目${_COLOR_RESET}")
+    set(IS_SINGLE_PROJECT TRUE)
   else()
     message(STATUS "${_COLOR_YELLOW}使用模式:${_COLOR_RESET} ${_COLOR_BOLD}子项目${_COLOR_RESET}（${CMAKE_CURRENT_SOURCE_DIR}）")
+    set(IS_SINGLE_PROJECT FALSE)
   endif()
 
   find_package(QT NAMES Qt6 Qt5 COMPONENTS ${QT_COMPONENTS} REQUIRED)
@@ -287,6 +428,23 @@ function(setup_qt target)
 
   # 获取 Qt 安装前缀路径（所有平台通用，用于打包工具）
   _get_qt_prefix_dir()
+
+  # 确定打包模式
+  set(ENABLE_DEPLOY FALSE)
+  set(FULL_DEPLOY FALSE)
+  
+  if(QT_DEPLOY OR QT_DEPLOY_FULL)
+    set(ENABLE_DEPLOY TRUE)
+  endif()
+  
+  if(QT_DEPLOY_FULL)
+    set(FULL_DEPLOY TRUE)
+    message(STATUS "${_COLOR_MAGENTA}打包模式:${_COLOR_RESET} ${_COLOR_BOLD}完整打包（DEPLOY_FULL）${_COLOR_RESET}")
+  elseif(QT_DEPLOY)
+    message(STATUS "${_COLOR_MAGENTA}打包模式:${_COLOR_RESET} ${_COLOR_BOLD}标准打包（DEPLOY）${_COLOR_RESET}")
+  else()
+    message(STATUS "${_COLOR_MAGENTA}打包模式:${_COLOR_RESET} ${_COLOR_BOLD}开发模式（仅复制 platforms）${_COLOR_RESET}")
+  endif()
 
   # 平台运行时提示与可选配置
   if(WIN32)
@@ -312,7 +470,7 @@ function(setup_qt target)
     endif()
     
     # 自动打包或复制插件
-    if(QT_DEPLOY)
+    if(ENABLE_DEPLOY)
       # 使用 windeployqt 自动打包所有依赖（推荐方式）
       # 构建搜索路径列表
       set(WINDEPLOYQT_SEARCH_PATHS "")
@@ -338,11 +496,89 @@ function(setup_qt target)
       )
       
       if(WINDEPLOYQT_EXECUTABLE)
+        # 构建 windeployqt 参数
+        set(DEPLOY_ARGS "")
+        if(FULL_DEPLOY)
+          # 完整打包：包含所有插件和翻译
+          list(APPEND DEPLOY_ARGS --verbose 1)
+        else()
+          # 标准打包：排除不必要的插件
+          list(APPEND DEPLOY_ARGS --no-translations)
+          list(APPEND DEPLOY_ARGS --no-system-d3d-compiler)
+          list(APPEND DEPLOY_ARGS --no-opengl-sw)
+        endif()
+        
         # 构建后自动运行 windeployqt 打包
         add_custom_command(TARGET ${target} POST_BUILD
           COMMAND ${WINDEPLOYQT_EXECUTABLE}
+            ${DEPLOY_ARGS}
             \"$<TARGET_FILE:${target}>\"
-          COMMENT "自动打包 Qt 依赖（windeployqt）"
+          COMMENT "自动打包 Qt 依赖（windeployqt ${FULL_DEPLOY}）"
+        )
+        message(STATUS "Windows: 已启用自动打包（windeployqt），构建后自动复制所有 Qt 依赖")
+        message(STATUS "Windows: windeployqt 路径: ${WINDEPLOYQT_EXECUTABLE}")
+        
+        # 生成 qt.conf
+        _generate_qt_conf(${target})
+      else()
+        message(WARNING "Windows: 未找到 windeployqt 工具，无法自动打包。请手动运行 windeployqt 或使用 DEPLOY 选项")
+        # 回退到手动复制 platforms 插件
+        _copy_platforms_plugin(${target} "${QT_PLUGIN_SOURCE_PATH}")
+        if(QT_PLUGIN_SOURCE_PATH AND EXISTS "${QT_PLUGIN_SOURCE_PATH}")
+          message(STATUS "Windows: 已启用自动复制 platforms 插件（windeployqt 未找到，使用备用方案）")
+        endif()
+      endif()
+    else()
+      # 手动复制 platforms 插件（轻量级方案）
+      _copy_platforms_plugin(${target} "${QT_PLUGIN_SOURCE_PATH}")
+      if(QT_PLUGIN_SOURCE_PATH AND EXISTS "${QT_PLUGIN_SOURCE_PATH}")
+        message(STATUS "Windows: 已启用自动复制 platforms 插件到运行目录（构建后自动完成）")
+        message(STATUS "Windows: 运行时依赖：请确保 Qt 的 bin 目录在 PATH 中，或使用 setup_qt(${target} DEPLOY) 自动打包")
+      else()
+        message(STATUS "Windows: 未找到 platforms 插件路径，跳过自动复制")
+        message(STATUS "Windows: 运行时依赖：请将 Qt 的 bin 和 plugins 目录加入 PATH，或使用 setup_qt(${target} DEPLOY) 自动打包")
+      endif()
+    endif()
+  elseif(APPLE)
+    set(CMAKE_MACOSX_RPATH ON)
+    set_target_properties(${target} PROPERTIES
+      MACOSX_BUNDLE TRUE
+      MACOSX_RPATH TRUE
+    )
+    message(STATUS "macOS: 已开启 CMAKE_MACOSX_RPATH，并设置 MACOSX_BUNDLE")
+    
+    # macOS 自动打包
+    if(ENABLE_DEPLOY)
+      # 查找 macdeployqt 工具
+      set(MACDEPLOYQT_SEARCH_PATHS "")
+      if(QT_PREFIX_DIR)
+        list(APPEND MACDEPLOYQT_SEARCH_PATHS "${QT_PREFIX_DIR}/bin")
+      endif()
+      if(DEFINED ENV{QT_PREFIX_PATH})
+        list(APPEND MACDEPLOYQT_SEARCH_PATHS "$ENV{QT_PREFIX_PATH}/bin")
+      endif()
+      
+      find_program(MACDEPLOYQT_EXECUTABLE
+        NAMES macdeployqt
+        PATHS ${MACDEPLOYQT_SEARCH_PATHS}
+        NO_DEFAULT_PATH
+      )
+      
+      if(MACDEPLOYQT_EXECUTABLE)
+        # 构建 macdeployqt 参数
+        set(DEPLOY_ARGS "")
+        if(FULL_DEPLOY)
+          list(APPEND DEPLOY_ARGS -verbose=2)
+        else()
+          list(APPEND DEPLOY_ARGS -verbose=1)
+        endif()
+        
+        # 构建后自动运行 macdeployqt 打包
+        add_custom_command(TARGET ${target} POST_BUILD
+          COMMAND ${MACDEPLOYQT_EXECUTABLE}
+            \"$<TARGET_BUNDLE_DIR:${target}>\"
+            ${DEPLOY_ARGS}
+          COMMENT "自动打包 Qt 依赖（macdeployqt）"
         )
         message(STATUS "Windows: 已启用自动打包（windeployqt），构建后自动复制所有 Qt 依赖")
         message(STATUS "Windows: windeployqt 路径: ${WINDEPLOYQT_EXECUTABLE}")
@@ -397,6 +633,13 @@ function(setup_qt target)
             \"$<TARGET_BUNDLE_DIR:${target}>\"
           COMMENT "自动打包 Qt 依赖（macdeployqt）"
         )
+        # 构建后自动运行 macdeployqt 打包
+        add_custom_command(TARGET ${target} POST_BUILD
+          COMMAND ${MACDEPLOYQT_EXECUTABLE}
+            \"$<TARGET_BUNDLE_DIR:${target}>\"
+            ${DEPLOY_ARGS}
+          COMMENT "自动打包 Qt 依赖（macdeployqt）"
+        )
         message(STATUS "macOS: 已启用自动打包（macdeployqt），构建后自动复制所有 Qt 依赖")
         message(STATUS "macOS: macdeployqt 路径: ${MACDEPLOYQT_EXECUTABLE}")
       else()
@@ -411,7 +654,7 @@ function(setup_qt target)
     message(STATUS "Linux: 如需 X11/Wayland 等额外模块，请在 COMPONENTS 中显式添加。")
     
     # Linux 自动打包
-    if(QT_DEPLOY)
+    if(ENABLE_DEPLOY)
       # 查找 linuxdeployqt 工具（如果安装了）
       find_program(LINUXDEPLOYQT_EXECUTABLE
         NAMES linuxdeployqt
@@ -423,12 +666,17 @@ function(setup_qt target)
       )
       
       if(LINUXDEPLOYQT_EXECUTABLE)
+        # 构建 linuxdeployqt 参数
+        set(DEPLOY_ARGS -bundle-non-qt-libs)
+        if(FULL_DEPLOY)
+          list(APPEND DEPLOY_ARGS -appimage)
+        endif()
+        
         # 构建后自动运行 linuxdeployqt 打包
         add_custom_command(TARGET ${target} POST_BUILD
           COMMAND ${LINUXDEPLOYQT_EXECUTABLE}
             \"$<TARGET_FILE:${target}>\"
-            -bundle-non-qt-libs
-            -appimage
+            ${DEPLOY_ARGS}
           COMMENT "自动打包 Qt 依赖（linuxdeployqt）"
         )
         message(STATUS "Linux: 已启用自动打包（linuxdeployqt），构建后自动复制所有 Qt 依赖")
@@ -447,25 +695,51 @@ function(setup_qt target)
     endif()
   endif()
   
+  # 多项目打包支持
+  if(NOT IS_SINGLE_PROJECT AND ENABLE_DEPLOY)
+    # 在多项目模式下，复制到统一的打包目录
+    if(DEFINED PACKAGE_BIN_DIR)
+      add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          \"$<TARGET_FILE:${target}>\"
+          \"${PACKAGE_BIN_DIR}\"
+        COMMENT "复制 ${target} 到统一打包目录"
+      )
+      message(STATUS "多项目: 已配置复制到统一打包目录: ${PACKAGE_BIN_DIR}")
+    endif()
+  endif()
+  
   # 添加 Qt 相关的构建完成命令提示
-  if(QT_DEPLOY)
+  if(ENABLE_DEPLOY)
     # 如果启用了自动打包，在构建完成后显示打包相关命令
-    add_custom_command(TARGET ${target} POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E echo ""
-      COMMAND ${CMAKE_COMMAND} -E echo "Qt 打包相关命令:"
-      if(WIN32)
+    if(WIN32)
+      add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E echo ""
+        COMMAND ${CMAKE_COMMAND} -E echo "Qt 打包相关命令:"
         COMMAND ${CMAKE_COMMAND} -E echo "  手动打包:     windeployqt $<TARGET_FILE:${target}>"
         COMMAND ${CMAKE_COMMAND} -E echo "  检查依赖:     dumpbin /dependents $<TARGET_FILE:${target}>"
-      elseif(APPLE)
-        COMMAND ${CMAKE_COMMAND} -E echo "  手动打包:     macdeployqt $<TARGET_BUNDLE_DIR:${target}>"
+        COMMAND ${CMAKE_COMMAND} -E echo ""
+        COMMENT "显示 Qt 打包相关命令"
+      )
+    elseif(APPLE)
+      add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E echo ""
+        COMMAND ${CMAKE_COMMAND} -E echo "Qt 打包相关命令:"
+        COMMAND ${CMAKE_COMMAND} -E echo "  手动打包:     macdeployqt ${target}.app"
         COMMAND ${CMAKE_COMMAND} -E echo "  检查依赖:     otool -L $<TARGET_FILE:${target}>"
-      else()
+        COMMAND ${CMAKE_COMMAND} -E echo ""
+        COMMENT "显示 Qt 打包相关命令"
+      )
+    else()
+      add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E echo ""
+        COMMAND ${CMAKE_COMMAND} -E echo "Qt 打包相关命令:"
         COMMAND ${CMAKE_COMMAND} -E echo "  手动打包:     linuxdeployqt $<TARGET_FILE:${target}> -bundle-non-qt-libs -appimage"
         COMMAND ${CMAKE_COMMAND} -E echo "  检查依赖:     ldd $<TARGET_FILE:${target}>"
-      endif()
-      COMMAND ${CMAKE_COMMAND} -E echo ""
-      COMMENT "显示 Qt 打包相关命令"
-    )
+        COMMAND ${CMAKE_COMMAND} -E echo ""
+        COMMENT "显示 Qt 打包相关命令"
+      )
+    endif()
   endif()
 endfunction()
 
@@ -596,6 +870,182 @@ macro(get_src_include)
 endmacro()
 
 # ----------------------------------------------------------------------------
+# 函数：查找并链接外部库
+# ----------------------------------------------------------------------------
+# 功能：统一查找和链接外部库，支持多种查找方式
+# 详细说明：cmake/README.md
+#
+# 用法：
+#   find_and_link_library(<target> <lib_name> [METHOD <method>] [COMPONENTS <comp1> <comp2> ...] [REQUIRED])
+#
+# 参数：
+#   target: 目标名称（必需）
+#   lib_name: 库名称（必需）
+#   METHOD: 查找方法（可选）
+#     - AUTO: 自动选择（默认，优先 find_package，然后 pkg-config，最后手动）
+#     - CMAKE: 使用 find_package（CMake 包）
+#     - PKG: 使用 pkg-config（Linux/macOS）
+#     - MANUAL: 手动指定路径（需要 LIB_PATH 和 INCLUDE_PATH）
+#   COMPONENTS: 库组件列表（可选，用于 find_package）
+#   REQUIRED: 如果未找到则报错（可选）
+#
+# 环境变量支持：
+#   ${LIB_NAME}_PATH: 库的安装路径（用于 MANUAL 方法）
+#   ${LIB_NAME}_INCLUDE_PATH: 头文件路径（用于 MANUAL 方法）
+#
+# 示例：
+#   find_and_link_library(myapp Boost REQUIRED COMPONENTS system filesystem)
+#   find_and_link_library(myapp OpenCV REQUIRED)
+#   find_and_link_library(myapp mylib METHOD MANUAL)
+function(find_and_link_library target lib_name)
+  if(NOT TARGET ${target})
+    message(FATAL_ERROR "find_and_link_library: 目标 ${target} 未创建，请先 add_executable/add_library。")
+  endif()
+
+  set(options REQUIRED)
+  set(oneValueArgs METHOD)
+  set(multiValueArgs COMPONENTS)
+  cmake_parse_arguments(LIB "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+
+  if(NOT LIB_METHOD)
+    set(LIB_METHOD AUTO)
+  endif()
+
+  message(STATUS "${_COLOR_YELLOW}查找库:${_COLOR_RESET} ${_COLOR_BOLD}${lib_name}${_COLOR_RESET} (方法: ${LIB_METHOD})")
+
+  set(LIB_FOUND FALSE)
+  string(TOUPPER ${lib_name} LIB_NAME_UPPER)
+
+  # 方法1: find_package (CMake 包)
+  if(LIB_METHOD STREQUAL "CMAKE" OR LIB_METHOD STREQUAL "AUTO")
+    if(LIB_COMPONENTS)
+      find_package(${lib_name} COMPONENTS ${LIB_COMPONENTS} QUIET)
+    else()
+      find_package(${lib_name} QUIET)
+    endif()
+
+    if(${lib_name}_FOUND OR ${LIB_NAME_UPPER}_FOUND)
+      set(LIB_FOUND TRUE)
+      message(STATUS "${_COLOR_GREEN}  ✓ 使用 find_package 找到 ${lib_name}${_COLOR_RESET}")
+      
+      # 链接库（优先使用导入目标）
+      if(TARGET ${lib_name}::${lib_name})
+        target_link_libraries(${target} PRIVATE ${lib_name}::${lib_name})
+      elseif(TARGET ${lib_name}::lib${lib_name})
+        target_link_libraries(${target} PRIVATE ${lib_name}::lib${lib_name})
+      elseif(TARGET ${lib_name})
+        target_link_libraries(${target} PRIVATE ${lib_name})
+      else()
+        # 使用变量方式链接
+        if(${lib_name}_LIBRARIES)
+          target_link_libraries(${target} PRIVATE ${${lib_name}_LIBRARIES})
+          if(${lib_name}_INCLUDE_DIRS)
+            target_include_directories(${target} PRIVATE ${${lib_name}_INCLUDE_DIRS})
+          endif()
+        endif()
+      endif()
+    endif()
+  endif()
+
+  # 方法2: pkg-config (Linux/macOS)
+  if((LIB_METHOD STREQUAL "PKG" OR (LIB_METHOD STREQUAL "AUTO" AND NOT LIB_FOUND)) AND NOT WIN32)
+    find_package(PkgConfig QUIET)
+    if(PKG_CONFIG_FOUND)
+      pkg_check_modules(PC_${LIB_NAME_UPPER} QUIET ${lib_name})
+      if(PC_${LIB_NAME_UPPER}_FOUND)
+        set(LIB_FOUND TRUE)
+        message(STATUS "${_COLOR_GREEN}  ✓ 使用 pkg-config 找到 ${lib_name}${_COLOR_RESET}")
+        
+        target_link_libraries(${target} PRIVATE ${PC_${LIB_NAME_UPPER}_LIBRARIES})
+        target_include_directories(${target} PRIVATE ${PC_${LIB_NAME_UPPER}_INCLUDE_DIRS})
+        if(PC_${LIB_NAME_UPPER}_LDFLAGS_OTHER)
+          target_link_options(${target} PRIVATE ${PC_${LIB_NAME_UPPER}_LDFLAGS_OTHER})
+        endif()
+        if(PC_${LIB_NAME_UPPER}_CFLAGS_OTHER)
+          target_compile_options(${target} PRIVATE ${PC_${LIB_NAME_UPPER}_CFLAGS_OTHER})
+        endif()
+      endif()
+    endif()
+  endif()
+
+  # 方法3: 手动指定路径
+  if(LIB_METHOD STREQUAL "MANUAL" OR (LIB_METHOD STREQUAL "AUTO" AND NOT LIB_FOUND))
+    set(LIB_PATH "")
+    set(INCLUDE_PATH "")
+    
+    # 从环境变量获取路径
+    if(DEFINED ENV{${LIB_NAME_UPPER}_PATH})
+      set(LIB_PATH "$ENV{${LIB_NAME_UPPER}_PATH}")
+      message(STATUS "${_COLOR_GREEN}  ✓ 从环境变量 ${LIB_NAME_UPPER}_PATH 获取路径${_COLOR_RESET}")
+    endif()
+    
+    if(DEFINED ENV{${LIB_NAME_UPPER}_INCLUDE_PATH})
+      set(INCLUDE_PATH "$ENV{${LIB_NAME_UPPER}_INCLUDE_PATH}")
+    endif()
+
+    # 如果提供了路径，使用 find_library 和 find_path
+    if(LIB_PATH)
+      # 查找库文件
+      if(WIN32)
+        find_library(${LIB_NAME_UPPER}_LIB
+          NAMES ${lib_name} lib${lib_name}
+          PATHS ${LIB_PATH}/lib ${LIB_PATH}/lib64 ${LIB_PATH}
+          NO_DEFAULT_PATH
+        )
+      else()
+        find_library(${LIB_NAME_UPPER}_LIB
+          NAMES ${lib_name} lib${lib_name}
+          PATHS ${LIB_PATH}/lib ${LIB_PATH}/lib64 ${LIB_PATH}
+          NO_DEFAULT_PATH
+        )
+      endif()
+
+      # 查找头文件
+      if(INCLUDE_PATH)
+        find_path(${LIB_NAME_UPPER}_INCLUDE_DIR
+          NAMES ${lib_name}.h ${lib_name}/${lib_name}.h
+          PATHS ${INCLUDE_PATH} ${LIB_PATH}/include
+          NO_DEFAULT_PATH
+        )
+      else()
+        find_path(${LIB_NAME_UPPER}_INCLUDE_DIR
+          NAMES ${lib_name}.h ${lib_name}/${lib_name}.h
+          PATHS ${LIB_PATH}/include ${LIB_PATH}
+          NO_DEFAULT_PATH
+        )
+      endif()
+
+      if(${LIB_NAME_UPPER}_LIB)
+        set(LIB_FOUND TRUE)
+        message(STATUS "${_COLOR_GREEN}  ✓ 手动找到 ${lib_name} 库${_COLOR_RESET}")
+        message(STATUS "${_COLOR_WHITE}    库文件: ${${LIB_NAME_UPPER}_LIB}${_COLOR_RESET}")
+        
+        target_link_libraries(${target} PRIVATE ${${LIB_NAME_UPPER}_LIB})
+        
+        if(${LIB_NAME_UPPER}_INCLUDE_DIR)
+          message(STATUS "${_COLOR_WHITE}    头文件: ${${LIB_NAME_UPPER}_INCLUDE_DIR}${_COLOR_RESET}")
+          target_include_directories(${target} PRIVATE ${${LIB_NAME_UPPER}_INCLUDE_DIR})
+        endif()
+      endif()
+    endif()
+  endif()
+
+  # 如果未找到且标记为 REQUIRED，报错
+  if(NOT LIB_FOUND)
+    if(LIB_REQUIRED)
+      message(FATAL_ERROR "${_COLOR_RED}未找到必需的库: ${lib_name}${_COLOR_RESET}\n"
+        "请检查:\n"
+        "  1. 库是否已安装\n"
+        "  2. CMAKE_PREFIX_PATH 是否正确设置\n"
+        "  3. 环境变量 ${LIB_NAME_UPPER}_PATH 是否设置（用于 MANUAL 方法）\n"
+        "  4. pkg-config 是否可用（Linux/macOS）")
+    else()
+      message(WARNING "${_COLOR_YELLOW}未找到库: ${lib_name}（非必需，继续构建）${_COLOR_RESET}")
+    endif()
+  endif()
+endfunction()
+
+# ----------------------------------------------------------------------------
 # 宏：配置 C++ 编译参数
 # ----------------------------------------------------------------------------
 # 功能：为指定的目标配置统一的编译设置
@@ -665,21 +1115,111 @@ macro(set_cpp name)
 endmacro()
 
 # ----------------------------------------------------------------------------
+# 宏：配置 GTest（内部辅助宏）
+# ----------------------------------------------------------------------------
+# 功能：查找和配置 GTest，支持多种查找方式
+function(setup_gtest)
+  # 如果已经找到，直接返回
+  if(GTest_FOUND OR TARGET GTest::gtest OR TARGET GTest::gtest_main)
+    return()
+  endif()
+
+  message(STATUS "${_COLOR_YELLOW}查找 GTest...${_COLOR_RESET}")
+
+  # 方法1: 使用 find_package（推荐，支持 vcpkg）
+  # vcpkg 会自动设置 CMAKE_PREFIX_PATH，所以直接查找即可
+  find_package(GTest QUIET)
+  
+  if(GTest_FOUND)
+    message(STATUS "${_COLOR_GREEN}  ✓ 使用 find_package 找到 GTest${_COLOR_RESET}")
+    if(TARGET GTest::gtest_main)
+      message(STATUS "${_COLOR_WHITE}    使用目标: GTest::gtest_main${_COLOR_RESET}")
+    elseif(TARGET GTest::gtest)
+      message(STATUS "${_COLOR_WHITE}    使用目标: GTest::gtest${_COLOR_RESET}")
+    endif()
+    return()
+  endif()
+
+  # 方法1.5: 如果设置了 GTEST_PATH 环境变量，添加到搜索路径
+  if(DEFINED ENV{GTEST_PATH})
+    list(APPEND CMAKE_PREFIX_PATH "$ENV{GTEST_PATH}/lib/cmake")
+    message(STATUS "${_COLOR_GREEN}  从环境变量 GTEST_PATH 获取路径: $ENV{GTEST_PATH}${_COLOR_RESET}")
+    find_package(GTest QUIET)
+    if(GTest_FOUND)
+      message(STATUS "${_COLOR_GREEN}  ✓ 使用 find_package 找到 GTest（通过 GTEST_PATH）${_COLOR_RESET}")
+      return()
+    endif()
+  endif()
+
+  # 方法2: 使用 find_and_link_library（如果可用）
+  # 注意：这里只是查找，不实际链接
+  if(DEFINED ENV{GTEST_PATH})
+    set(GTEST_LIB_PATH "$ENV{GTEST_PATH}/lib")
+    set(GTEST_INCLUDE_PATH "$ENV{GTEST_PATH}/include")
+    
+    find_library(GTEST_LIBRARY
+      NAMES gtest gtestd
+      PATHS ${GTEST_LIB_PATH}
+      NO_DEFAULT_PATH
+    )
+    
+    find_path(GTEST_INCLUDE_DIR
+      NAMES gtest/gtest.h
+      PATHS ${GTEST_INCLUDE_PATH}
+      NO_DEFAULT_PATH
+    )
+    
+    if(GTEST_LIBRARY AND GTEST_INCLUDE_DIR)
+      message(STATUS "${_COLOR_GREEN}  ✓ 从环境变量找到 GTest${_COLOR_RESET}")
+      message(STATUS "${_COLOR_WHITE}    库文件: ${GTEST_LIBRARY}${_COLOR_RESET}")
+      message(STATUS "${_COLOR_WHITE}    头文件: ${GTEST_INCLUDE_DIR}${_COLOR_RESET}")
+      set(GTEST_FOUND TRUE)
+      return()
+    endif()
+  endif()
+
+  # 如果都找不到，给出提示
+  message(WARNING "${_COLOR_YELLOW}未找到 GTest，请：${_COLOR_RESET}")
+  message(WARNING "${_COLOR_YELLOW}  1. 安装 GTest 并设置环境变量 GTEST_PATH${_COLOR_RESET}")
+  message(WARNING "${_COLOR_YELLOW}  2. 或使用 vcpkg: vcpkg install gtest${_COLOR_RESET}")
+  message(WARNING "${_COLOR_YELLOW}  3. 或使用 find_and_link_library 手动查找${_COLOR_RESET}")
+endfunction()
+
+# ----------------------------------------------------------------------------
 # 函数：构建单元测试程序
 # ----------------------------------------------------------------------------
 # 功能：创建一个使用 Google Test 框架的单元测试可执行文件
 # 详细说明：cmake/README.md
 #
-# 参数：name - 测试程序的目标名称
-# 功能：自动安装配置 GTest、收集测试源码、链接 GTest、集成 CTest
+# 用法：
+#   cpp_test(<name> [LIB_SRC_DIR <dir>])
+#
+# 参数：
+#   name - 测试程序的目标名称（必需）
+#   LIB_SRC_DIR - 被测试库的源码目录（可选，默认: ../）
+#
+# 功能：自动查找配置 GTest、收集测试源码、链接 GTest、集成 CTest
 function(cpp_test name)
   message(STATUS "${_COLOR_CYAN}${_COLOR_BOLD}================ 开始配置单元测试: ${name} =================${_COLOR_RESET}")
 
+  # 解析参数
+  set(options)
+  set(oneValueArgs LIB_SRC_DIR)
+  set(multiValueArgs)
+  cmake_parse_arguments(TEST "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+
+  if(NOT TEST_LIB_SRC_DIR)
+    set(TEST_LIB_SRC_DIR "${CMAKE_CURRENT_LIST_DIR}/../")
+  endif()
+
   # ------------------------------------------------------------------------
-  # 步骤 1：安装和配置 GTest
+  # 步骤 1: 查找和配置 GTest
   # ------------------------------------------------------------------------
-  # 调用 setup_gtest 宏，确保 GTest 已安装并可用
   setup_gtest()
+  
+  if(NOT GTest_FOUND AND NOT TARGET GTest::gtest AND NOT TARGET GTest::gtest_main)
+    message(FATAL_ERROR "${_COLOR_RED}未找到 GTest，无法配置单元测试${_COLOR_RESET}")
+  endif()
 
   # ------------------------------------------------------------------------
   # 步骤 2：收集测试源码和头文件
@@ -688,14 +1228,17 @@ function(cpp_test name)
   get_src_include()
 
   # ------------------------------------------------------------------------
-  # 步骤 3：收集被测试库的源码
+  # 步骤 3：收集被测试库的源码（可选）
   # ------------------------------------------------------------------------
-  # 单元测试需要访问库的内部实现，所以需要包含库的源码
-  # ${CMAKE_CURRENT_LIST_DIR}/../ 指向被测试库的目录
-  # 例如：xlog/unit_test/../ 就是 xlog/ 目录
-  aux_source_directory(${CMAKE_CURRENT_LIST_DIR}/../ TEST_SRC)
-  # 将库的源码添加到测试源码列表中
-  list(APPEND SRC ${TEST_SRC})
+  # 单元测试可能需要访问库的内部实现，所以需要包含库的源码
+  # 如果提供了 LIB_SRC_DIR，则收集该目录的源码
+  if(TEST_LIB_SRC_DIR AND EXISTS "${TEST_LIB_SRC_DIR}")
+    aux_source_directory(${TEST_LIB_SRC_DIR} TEST_SRC)
+    if(TEST_SRC)
+      list(APPEND SRC ${TEST_SRC})
+      message(STATUS "${_COLOR_GREEN}已收集库源码目录: ${TEST_LIB_SRC_DIR}${_COLOR_RESET}")
+    endif()
+  endif()
 
   # ------------------------------------------------------------------------
   # 步骤 4：创建测试可执行文件
@@ -717,46 +1260,33 @@ function(cpp_test name)
     )
 
   # ------------------------------------------------------------------------
-  # 步骤 6：查找 GTest 包
+  # 步骤 6：链接 GTest 库
   # ------------------------------------------------------------------------
-  # CMAKE_PREFIX_PATH 是 find_package 查找配置文件的搜索路径
-  # GTest 安装后会生成 Config.cmake 文件，需要在此路径中查找
-  set(CMAKE_PREFIX_PATH ${GTEST_PATH}/lib/cmake/)
+  # 优先使用 CMake 导入的目标（如果 find_package 成功）
 
-  # find_package 查找已安装的 GTest 包
-  # 如果找到，会设置 GTest_FOUND = TRUE 并提供 GTest::* 目标
-  find_package(GTest)
-  message(STATUS "GTest 查找结果: ${GTest_FOUND}")
-
-  # ------------------------------------------------------------------------
-  # 步骤 7：配置 GTest 库路径和头文件路径
-  # ------------------------------------------------------------------------
-  # target_link_directories: 设置链接器查找 GTest 库文件的路径
-  target_link_directories(${name} PRIVATE ${GTEST_PATH}/lib)
-
-  # target_include_directories: 设置编译器查找 GTest 头文件的路径
-  target_include_directories(${name} PRIVATE ${GTEST_PATH}/include)
-
-  # ------------------------------------------------------------------------
-  # 步骤 8：链接 GTest 库
-  # ------------------------------------------------------------------------
-  # Windows 和 Linux 的 GTest 库链接方式不同
-  if(WIN32)
-    # Windows: 使用 CMake 导入的目标（推荐方式）
+  # 优先使用 CMake 导入的目标（如果 find_package 成功）
+  if(TARGET GTest::gtest_main)
+    # 使用 CMake 导入的目标（推荐方式）
     # GTest::gtest_main 包含了 main 函数，自动运行所有测试
-    target_link_libraries(${name}
-            GTest::gtest_main
-        )
+    target_link_libraries(${name} PRIVATE GTest::gtest_main)
+    message(STATUS "${_COLOR_GREEN}使用 GTest::gtest_main（CMake 目标）${_COLOR_RESET}")
+  elseif(TARGET GTest::gtest)
+    # 如果没有 gtest_main，使用 gtest 并手动提供 main
+    target_link_libraries(${name} PRIVATE GTest::gtest)
+    message(STATUS "${_COLOR_GREEN}使用 GTest::gtest（CMake 目标）${_COLOR_RESET}")
+  elseif(GTEST_LIBRARY)
+    # 使用手动找到的库
+    target_link_libraries(${name} PRIVATE ${GTEST_LIBRARY})
+    target_include_directories(${name} PRIVATE ${GTEST_INCLUDE_DIR})
+    message(STATUS "${_COLOR_GREEN}使用手动找到的 GTest 库${_COLOR_RESET}")
   else()
-    # Linux/Unix: 直接链接库文件名
-    # gtest_main: 提供 main 函数
-    # gtest: 核心测试框架
-    target_link_libraries(${name}
-            gtest_main
-            gtest
-        )
-    # Linux 需要链接 pthread
-    target_link_libraries(${name} pthread)
+    # 尝试使用 find_and_link_library（如果可用）
+    find_and_link_library(${name} GTest)
+  endif()
+  
+  # Linux/Unix 需要链接 pthread
+  if(NOT WIN32)
+    target_link_libraries(${name} PRIVATE pthread)
   endif()
 
   # ------------------------------------------------------------------------
@@ -840,30 +1370,26 @@ function(cpp_execute name)
   
   # 添加构建完成后的命令提示（根据平台输出不同命令）
   if(WIN32)
-    # Windows 平台命令
+    # Windows 平台命令（使用 chcp 65001 设置 UTF-8 编码避免乱码）
     add_custom_command(TARGET ${name} POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E echo ""
       COMMAND ${CMAKE_COMMAND} -E echo "============================================================================"
-      COMMAND ${CMAKE_COMMAND} -E echo "构建完成: ${name}"
+      COMMAND ${CMAKE_COMMAND} -E echo "Build completed: ${name}"
       COMMAND ${CMAKE_COMMAND} -E echo "============================================================================"
-      COMMAND ${CMAKE_COMMAND} -E echo "可执行文件: $<TARGET_FILE:${name}>"
+      COMMAND ${CMAKE_COMMAND} -E echo "Executable: $<TARGET_FILE:${name}>"
       COMMAND ${CMAKE_COMMAND} -E echo ""
-      COMMAND ${CMAKE_COMMAND} -E echo "常用命令:"
-      COMMAND ${CMAKE_COMMAND} -E echo "  运行程序:     $<TARGET_FILE:${name}>"
-      COMMAND ${CMAKE_COMMAND} -E echo "  或:           .\\bin\\${name}.exe"
-      COMMAND ${CMAKE_COMMAND} -E echo "  重新构建:     cmake --build ${CMAKE_BINARY_DIR} --target ${name}"
-      COMMAND ${CMAKE_COMMAND} -E echo "  清理构建:     cmake --build ${CMAKE_BINARY_DIR} --target clean"
-      COMMAND ${CMAKE_COMMAND} -E echo "  安装程序:     cmake --install ${CMAKE_BINARY_DIR}"
-      COMMAND ${CMAKE_COMMAND} -E echo "  生成文档:     cmake --build ${CMAKE_BINARY_DIR} --target docs"
-      COMMAND ${CMAKE_COMMAND} -E echo "  打包程序:     cmake --build ${CMAKE_BINARY_DIR} --target package"
+      COMMAND ${CMAKE_COMMAND} -E echo "Common commands:"
+      COMMAND ${CMAKE_COMMAND} -E echo "  Run:          $<TARGET_FILE:${name}>"
+      COMMAND ${CMAKE_COMMAND} -E echo "  Or:           .\\bin\\${name}.exe"
+      COMMAND ${CMAKE_COMMAND} -E echo "  Rebuild:      cmake --build ${CMAKE_BINARY_DIR} --target ${name}"
+      COMMAND ${CMAKE_COMMAND} -E echo "  Clean:        cmake --build ${CMAKE_BINARY_DIR} --target clean"
+      COMMAND ${CMAKE_COMMAND} -E echo "  Install:      cmake --install ${CMAKE_BINARY_DIR}"
+      COMMAND ${CMAKE_COMMAND} -E echo "  Package:      cmake --build ${CMAKE_BINARY_DIR} --target package"
       COMMAND ${CMAKE_COMMAND} -E echo ""
-      COMMAND ${CMAKE_COMMAND} -E echo "生成 compile_commands.json (用于 clangd/IDE):"
-      COMMAND ${CMAKE_COMMAND} -E echo "  方法1 (推荐): cmake --build ${CMAKE_BINARY_DIR} --target gen_compile_commands"
-      COMMAND ${CMAKE_COMMAND} -E echo "  方法2:        cmake --build ${CMAKE_BINARY_DIR} --target copy_compile_commands"
-      COMMAND ${CMAKE_COMMAND} -E echo "  方法3:        copy ${CMAKE_BINARY_DIR}\\compile_commands.json ."
-      COMMAND ${CMAKE_COMMAND} -E echo "  注意:         Visual Studio 生成器不支持，需使用 Ninja 生成器"
+      COMMAND ${CMAKE_COMMAND} -E echo "Generate compile_commands.json (for clangd/IDE):"
+      COMMAND ${CMAKE_COMMAND} -E echo "  Note: Visual Studio generator does not support, use Ninja instead"
       COMMAND ${CMAKE_COMMAND} -E echo ""
-      COMMENT "显示构建完成信息和常用命令"
+      COMMENT "Display build completion info"
     )
   elseif(APPLE)
     # macOS 平台命令
@@ -925,7 +1451,7 @@ endfunction()
 # 参数：name - 库的目标名称（必需）
 # 选项：${NAME}_SHARED (ON=动态库, OFF=静态库)，可通过 cmake -DXLOG_SHARED=OFF 控制
 function(cpp_library name)
-  message(STATUS "================ 开始配置库: ${name} =================")
+  message(STATUS "${_COLOR_CYAN}${_COLOR_BOLD}================ 开始配置库: ${name} =================${_COLOR_RESET}")
 
   # ------------------------------------------------------------------------
   # 步骤 1：确定库的类型（静态库或动态库）
@@ -1030,7 +1556,7 @@ function(cpp_library name)
   #
   # 设置版本文件的路径（源码目录）
   set(CONF_VER_FILE
-        ${CMAKE_CURRENT_LIST_DIR}/../../lib/conf/${name}-${version}/${name}ConfigVersion.cmake
+        ${CMAKE_CURRENT_LIST_DIR}/../lib/conf/${name}-${version}/${name}ConfigVersion.cmake
     )
 
   message(STATUS "版本配置文件路径: ${CONF_VER_FILE}")
@@ -1054,5 +1580,317 @@ function(cpp_library name)
         DESTINATION lib/config/${name}-${version}
     )
 
-  message(STATUS "================ 库配置完成: ${name} =================")
+  message(STATUS "${_COLOR_GREEN}${_COLOR_BOLD}================ 库配置完成: ${name} =================${_COLOR_RESET}")
+  
+  # 添加构建完成后的命令提示（根据平台输出不同命令）
+  if(WIN32)
+    # Windows 平台命令（使用 chcp 65001 设置 UTF-8 编码避免乱码）
+    add_custom_command(TARGET ${name} POST_BUILD
+      COMMAND cmd /c "chcp 65001 >nul && echo."
+      COMMAND cmd /c "chcp 65001 >nul && echo ============================================================================"
+      COMMAND cmd /c "chcp 65001 >nul && echo 构建完成: ${name} (${TYPE})"
+      COMMAND cmd /c "chcp 65001 >nul && echo ============================================================================"
+      COMMAND cmd /c "chcp 65001 >nul && echo 库文件位置: $<TARGET_FILE:${name}>"
+      COMMAND cmd /c "if \"${${NAME}_SHARED}\"==\"ON\" (chcp 65001 >nul && echo 库类型: 动态库 (.dll)) else (chcp 65001 >nul && echo 库类型: 静态库 (.lib))"
+      COMMAND cmd /c "chcp 65001 >nul && echo."
+      COMMAND cmd /c "chcp 65001 >nul && echo 常用命令:"
+      COMMAND cmd /c "chcp 65001 >nul && echo   重新构建:     cmake --build ${CMAKE_BINARY_DIR} --target ${name}"
+      COMMAND cmd /c "chcp 65001 >nul && echo   清理构建:     cmake --build ${CMAKE_BINARY_DIR} --target clean"
+      COMMAND cmd /c "chcp 65001 >nul && echo   安装库:       cmake --install ${CMAKE_BINARY_DIR}"
+      COMMAND cmd /c "chcp 65001 >nul && echo   切换类型:     cmake -S . -B ${CMAKE_BINARY_DIR} -D${NAME}_SHARED=OFF"
+      COMMAND cmd /c "chcp 65001 >nul && echo   生成文档:     cmake --build ${CMAKE_BINARY_DIR} --target docs"
+      COMMAND cmd /c "chcp 65001 >nul && echo."
+      COMMAND cmd /c "chcp 65001 >nul && echo 生成 compile_commands.json (用于 clangd/IDE):"
+      COMMAND cmd /c "chcp 65001 >nul && echo   方法1 (推荐): cmake --build ${CMAKE_BINARY_DIR} --target gen_compile_commands"
+      COMMAND cmd /c "chcp 65001 >nul && echo   方法2:        cmake --build ${CMAKE_BINARY_DIR} --target copy_compile_commands"
+      COMMAND cmd /c "chcp 65001 >nul && echo   方法3:        copy ${CMAKE_BINARY_DIR}\\compile_commands.json ."
+      COMMAND cmd /c "chcp 65001 >nul && echo   注意:         Visual Studio 生成器不支持，需使用 Ninja 生成器"
+      COMMAND cmd /c "chcp 65001 >nul && echo."
+      COMMENT "显示库构建完成信息和常用命令"
+    )
+  elseif(APPLE)
+    # macOS 平台命令
+    add_custom_command(TARGET ${name} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E echo ""
+      COMMAND ${CMAKE_COMMAND} -E echo "============================================================================"
+      COMMAND ${CMAKE_COMMAND} -E echo "构建完成: ${name} (${TYPE})"
+      COMMAND ${CMAKE_COMMAND} -E echo "============================================================================"
+      COMMAND ${CMAKE_COMMAND} -E echo "库文件位置: $<TARGET_FILE:${name}>"
+      if(${NAME}_SHARED)
+        COMMAND ${CMAKE_COMMAND} -E echo "库类型: 动态库 (.dylib)"
+      else()
+        COMMAND ${CMAKE_COMMAND} -E echo "库类型: 静态库 (.a)"
+      endif()
+      COMMAND ${CMAKE_COMMAND} -E echo ""
+      COMMAND ${CMAKE_COMMAND} -E echo "常用命令:"
+      COMMAND ${CMAKE_COMMAND} -E echo "  重新构建:     cmake --build ${CMAKE_BINARY_DIR} --target ${name}"
+      COMMAND ${CMAKE_COMMAND} -E echo "  清理构建:     cmake --build ${CMAKE_BINARY_DIR} --target clean"
+      COMMAND ${CMAKE_COMMAND} -E echo "  安装库:       cmake --install ${CMAKE_BINARY_DIR}"
+      COMMAND ${CMAKE_COMMAND} -E echo "  切换类型:     cmake -S . -B ${CMAKE_BINARY_DIR} -D${NAME}_SHARED=OFF"
+      COMMAND ${CMAKE_COMMAND} -E echo ""
+      COMMAND ${CMAKE_COMMAND} -E echo "生成 compile_commands.json (用于 clangd/IDE):"
+      COMMAND ${CMAKE_COMMAND} -E echo "  方法1 (推荐): cmake --build ${CMAKE_BINARY_DIR} --target gen_compile_commands"
+      COMMAND ${CMAKE_COMMAND} -E echo "  方法2:        cmake --build ${CMAKE_BINARY_DIR} --target copy_compile_commands"
+      COMMAND ${CMAKE_COMMAND} -E echo "  方法3:        cp ${CMAKE_BINARY_DIR}/compile_commands.json ."
+      COMMAND ${CMAKE_COMMAND} -E echo ""
+      COMMENT "显示库构建完成信息和常用命令"
+    )
+  else()
+    # Linux 平台命令
+    add_custom_command(TARGET ${name} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E echo ""
+      COMMAND ${CMAKE_COMMAND} -E echo "============================================================================"
+      COMMAND ${CMAKE_COMMAND} -E echo "构建完成: ${name} (${TYPE})"
+      COMMAND ${CMAKE_COMMAND} -E echo "============================================================================"
+      COMMAND ${CMAKE_COMMAND} -E echo "库文件位置: $<TARGET_FILE:${name}>"
+      if(${NAME}_SHARED)
+        COMMAND ${CMAKE_COMMAND} -E echo "库类型: 动态库 (.so)"
+      else()
+        COMMAND ${CMAKE_COMMAND} -E echo "库类型: 静态库 (.a)"
+      endif()
+      COMMAND ${CMAKE_COMMAND} -E echo ""
+      COMMAND ${CMAKE_COMMAND} -E echo "常用命令:"
+      COMMAND ${CMAKE_COMMAND} -E echo "  重新构建:     cmake --build ${CMAKE_BINARY_DIR} --target ${name}"
+      COMMAND ${CMAKE_COMMAND} -E echo "  清理构建:     cmake --build ${CMAKE_BINARY_DIR} --target clean"
+      COMMAND ${CMAKE_COMMAND} -E echo "  安装库:       cmake --install ${CMAKE_BINARY_DIR}"
+      COMMAND ${CMAKE_COMMAND} -E echo "  切换类型:     cmake -S . -B ${CMAKE_BINARY_DIR} -D${NAME}_SHARED=OFF"
+      COMMAND ${CMAKE_COMMAND} -E echo ""
+      COMMAND ${CMAKE_COMMAND} -E echo "生成 compile_commands.json (用于 clangd/IDE):"
+      COMMAND ${CMAKE_COMMAND} -E echo "  方法1 (推荐): cmake --build ${CMAKE_BINARY_DIR} --target gen_compile_commands"
+      COMMAND ${CMAKE_COMMAND} -E echo "  方法2:        cmake --build ${CMAKE_BINARY_DIR} --target copy_compile_commands"
+      COMMAND ${CMAKE_COMMAND} -E echo "  方法3:        cp ${CMAKE_BINARY_DIR}/compile_commands.json ."
+      COMMAND ${CMAKE_COMMAND} -E echo ""
+      COMMENT "显示库构建完成信息和常用命令"
+    )
+  endif()
+endfunction()
+
+# ============================================================================
+# CPack 打包配置函数
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# 函数：配置 CPack 打包
+# ----------------------------------------------------------------------------
+# 功能：为项目配置 CPack，支持生成各平台的安装包
+# 详细说明：cmake/README.md
+#
+# 用法：
+#   setup_cpack(
+#     [VENDOR <vendor_name>]
+#     [DESCRIPTION <description>]
+#     [LICENSE_FILE <license_file_path>]
+#     [README_FILE <readme_file_path>]
+#     [ICON <icon_file_path>]
+#     [CONTACT <contact_info>]
+#   )
+#
+# 参数：
+#   VENDOR: 供应商名称（默认: ${PROJECT_NAME}）
+#   DESCRIPTION: 项目描述（默认: ${PROJECT_NAME} Application）
+#   LICENSE_FILE: 许可证文件路径
+#   README_FILE: README 文件路径
+#   ICON: 应用图标文件路径（Windows: .ico, macOS: .icns）
+#   CONTACT: 联系信息（邮箱等）
+#
+# 生成的安装包类型：
+#   Windows: NSIS (安装程序) 或 ZIP (压缩包)
+#   macOS: DragNDrop (.dmg) 或 Bundle
+#   Linux: DEB, RPM, TGZ
+#
+# 使用方法：
+#   cmake --build build --target package
+function(setup_cpack)
+  set(options)
+  set(oneValueArgs VENDOR DESCRIPTION LICENSE_FILE README_FILE ICON CONTACT)
+  set(multiValueArgs)
+  cmake_parse_arguments(CPACK_ARG "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+  
+  message(STATUS "")
+  message(STATUS "${_COLOR_CYAN}${_COLOR_BOLD}============================================================================${_COLOR_RESET}")
+  message(STATUS "${_COLOR_CYAN}${_COLOR_BOLD}配置 CPack 打包${_COLOR_RESET}")
+  message(STATUS "${_COLOR_CYAN}${_COLOR_BOLD}============================================================================${_COLOR_RESET}")
+  
+  # 设置基本信息
+  set(CPACK_PACKAGE_NAME ${PROJECT_NAME})
+  set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
+  set(CPACK_PACKAGE_VENDOR ${CPACK_ARG_VENDOR})
+  if(NOT CPACK_PACKAGE_VENDOR)
+    set(CPACK_PACKAGE_VENDOR ${PROJECT_NAME})
+  endif()
+  
+  set(CPACK_PACKAGE_DESCRIPTION_SUMMARY ${CPACK_ARG_DESCRIPTION})
+  if(NOT CPACK_PACKAGE_DESCRIPTION_SUMMARY)
+    set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "${PROJECT_NAME} Application")
+  endif()
+  
+  set(CPACK_PACKAGE_CONTACT ${CPACK_ARG_CONTACT})
+  if(NOT CPACK_PACKAGE_CONTACT)
+    set(CPACK_PACKAGE_CONTACT "support@${PROJECT_NAME}.com")
+  endif()
+  
+  # 安装目录
+  set(CPACK_PACKAGE_INSTALL_DIRECTORY ${PROJECT_NAME})
+  
+  # 资源文件
+  if(CPACK_ARG_LICENSE_FILE AND EXISTS ${CPACK_ARG_LICENSE_FILE})
+    set(CPACK_RESOURCE_FILE_LICENSE ${CPACK_ARG_LICENSE_FILE})
+    message(STATUS "${_COLOR_GREEN}许可证文件:${_COLOR_RESET} ${CPACK_ARG_LICENSE_FILE}")
+  endif()
+  
+  if(CPACK_ARG_README_FILE AND EXISTS ${CPACK_ARG_README_FILE})
+    set(CPACK_RESOURCE_FILE_README ${CPACK_ARG_README_FILE})
+    message(STATUS "${_COLOR_GREEN}README 文件:${_COLOR_RESET} ${CPACK_ARG_README_FILE}")
+  endif()
+  
+  # 平台特定配置
+  if(WIN32)
+    # Windows 平台：NSIS 安装程序或 ZIP 压缩包
+    set(CPACK_GENERATOR "NSIS;ZIP")
+    
+    # NSIS 配置
+    set(CPACK_NSIS_DISPLAY_NAME ${PROJECT_NAME})
+    set(CPACK_NSIS_PACKAGE_NAME ${PROJECT_NAME})
+    set(CPACK_NSIS_HELP_LINK "https://www.${PROJECT_NAME}.com")
+    set(CPACK_NSIS_URL_INFO_ABOUT "https://www.${PROJECT_NAME}.com")
+    set(CPACK_NSIS_CONTACT ${CPACK_PACKAGE_CONTACT})
+    set(CPACK_NSIS_MODIFY_PATH ON)
+    set(CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL ON)
+    
+    # 图标设置
+    if(CPACK_ARG_ICON AND EXISTS ${CPACK_ARG_ICON})
+      set(CPACK_NSIS_MUI_ICON ${CPACK_ARG_ICON})
+      set(CPACK_NSIS_MUI_UNIICON ${CPACK_ARG_ICON})
+      message(STATUS "${_COLOR_GREEN}安装图标:${_COLOR_RESET} ${CPACK_ARG_ICON}")
+    endif()
+    
+    # 开始菜单快捷方式
+    set(CPACK_NSIS_MENU_LINKS
+      "bin/${PROJECT_NAME}.exe" "${PROJECT_NAME}"
+    )
+    
+    message(STATUS "${_COLOR_MAGENTA}Windows 打包类型:${_COLOR_RESET} NSIS 安装程序, ZIP 压缩包")
+    
+  elseif(APPLE)
+    # macOS 平台：DMG 或 Bundle
+    set(CPACK_GENERATOR "DragNDrop;TGZ")
+    
+    # DMG 配置
+    set(CPACK_DMG_VOLUME_NAME ${PROJECT_NAME})
+    set(CPACK_DMG_FORMAT "UDBZ")
+    
+    if(CPACK_ARG_ICON AND EXISTS ${CPACK_ARG_ICON})
+      set(CPACK_DMG_DS_STORE_SETUP_SCRIPT ${CPACK_ARG_ICON})
+      message(STATUS "${_COLOR_GREEN}DMG 图标:${_COLOR_RESET} ${CPACK_ARG_ICON}")
+    endif()
+    
+    message(STATUS "${_COLOR_MAGENTA}macOS 打包类型:${_COLOR_RESET} DMG, TGZ")
+    
+  else()
+    # Linux 平台：DEB, RPM, TGZ
+    set(CPACK_GENERATOR "DEB;RPM;TGZ")
+    
+    # DEB 配置
+    set(CPACK_DEBIAN_PACKAGE_MAINTAINER ${CPACK_PACKAGE_CONTACT})
+    set(CPACK_DEBIAN_PACKAGE_SECTION "utils")
+    set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
+    set(CPACK_DEBIAN_PACKAGE_DEPENDS "libc6, libstdc++6")
+    
+    # RPM 配置
+    set(CPACK_RPM_PACKAGE_LICENSE "Proprietary")
+    set(CPACK_RPM_PACKAGE_GROUP "Applications/System")
+    set(CPACK_RPM_PACKAGE_REQUIRES "glibc, libstdc++")
+    
+    message(STATUS "${_COLOR_MAGENTA}Linux 打包类型:${_COLOR_RESET} DEB, RPM, TGZ")
+  endif()
+  
+  # 包含 CPack 模块
+  include(CPack)
+  
+  message(STATUS "${_COLOR_GREEN}CPack 配置完成${_COLOR_RESET}")
+  message(STATUS "${_COLOR_CYAN}打包命令:${_COLOR_RESET} cmake --build ${CMAKE_BINARY_DIR} --target package")
+  message(STATUS "${_COLOR_CYAN}${_COLOR_BOLD}============================================================================${_COLOR_RESET}")
+  message(STATUS "")
+endfunction()
+
+# ----------------------------------------------------------------------------
+# 函数：配置多项目统一打包
+# ----------------------------------------------------------------------------
+# 功能：为多项目场景配置统一的打包目标
+# 详细说明：cmake/README.md
+#
+# 用法：
+#   setup_multi_project_package(
+#     [PROJECTS <project1> <project2> ...]
+#     [OUTPUT_DIR <output_directory>]
+#   )
+#
+# 参数：
+#   PROJECTS: 需要打包的项目列表
+#   OUTPUT_DIR: 输出目录（默认: ${CMAKE_BINARY_DIR}/package）
+#
+# 功能：
+#   - 创建统一的打包目录结构
+#   - 复制所有项目的可执行文件和库到统一目录
+#   - 生成统一的依赖配置
+#   - 支持一键打包所有项目
+function(setup_multi_project_package)
+  set(options)
+  set(oneValueArgs OUTPUT_DIR)
+  set(multiValueArgs PROJECTS)
+  cmake_parse_arguments(MPP "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+  
+  if(NOT MPP_OUTPUT_DIR)
+    set(MPP_OUTPUT_DIR "${CMAKE_BINARY_DIR}/package")
+  endif()
+  
+  message(STATUS "")
+  message(STATUS "${_COLOR_CYAN}${_COLOR_BOLD}============================================================================${_COLOR_RESET}")
+  message(STATUS "${_COLOR_CYAN}${_COLOR_BOLD}配置多项目统一打包${_COLOR_RESET}")
+  message(STATUS "${_COLOR_CYAN}${_COLOR_BOLD}============================================================================${_COLOR_RESET}")
+  
+  # 创建打包目录结构
+  set(PACKAGE_ROOT_DIR "${MPP_OUTPUT_DIR}" CACHE PATH "多项目打包根目录" FORCE)
+  set(PACKAGE_BIN_DIR "${PACKAGE_ROOT_DIR}/bin" CACHE PATH "多项目打包可执行文件目录" FORCE)
+  set(PACKAGE_LIB_DIR "${PACKAGE_ROOT_DIR}/lib" CACHE PATH "多项目打包库文件目录" FORCE)
+  set(PACKAGE_PLUGIN_DIR "${PACKAGE_ROOT_DIR}/plugins" CACHE PATH "多项目打包插件目录" FORCE)
+  set(PACKAGE_DOC_DIR "${PACKAGE_ROOT_DIR}/docs" CACHE PATH "多项目打包文档目录" FORCE)
+  
+  message(STATUS "${_COLOR_GREEN}打包根目录:${_COLOR_RESET} ${PACKAGE_ROOT_DIR}")
+  message(STATUS "${_COLOR_GREEN}可执行文件目录:${_COLOR_RESET} ${PACKAGE_BIN_DIR}")
+  message(STATUS "${_COLOR_GREEN}库文件目录:${_COLOR_RESET} ${PACKAGE_LIB_DIR}")
+  
+  # 如果指定了项目列表，创建统一打包目标
+  if(MPP_PROJECTS)
+    message(STATUS "${_COLOR_MAGENTA}包含项目:${_COLOR_RESET} ${MPP_PROJECTS}")
+    
+    # 创建统一打包目标
+    add_custom_target(package_all
+      COMMAND ${CMAKE_COMMAND} -E echo "正在打包所有项目..."
+      COMMENT "统一打包所有项目"
+    )
+    
+    # 为每个项目添加依赖
+    foreach(proj IN LISTS MPP_PROJECTS)
+      if(TARGET ${proj})
+        add_dependencies(package_all ${proj})
+        
+        # 添加复制命令
+        add_custom_command(TARGET package_all POST_BUILD
+          COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            \"$<TARGET_FILE:${proj}>\"
+            \"${PACKAGE_BIN_DIR}\"
+          COMMENT "复制 ${proj} 到打包目录"
+        )
+      else()
+        message(WARNING "${_COLOR_YELLOW}项目 ${proj} 不存在，跳过${_COLOR_RESET}")
+      endif()
+    endforeach()
+    
+    message(STATUS "${_COLOR_GREEN}已创建统一打包目标:${_COLOR_RESET} package_all")
+    message(STATUS "${_COLOR_CYAN}打包命令:${_COLOR_RESET} cmake --build ${CMAKE_BINARY_DIR} --target package_all")
+  endif()
+  
+  message(STATUS "${_COLOR_CYAN}${_COLOR_BOLD}============================================================================${_COLOR_RESET}")
+  message(STATUS "")
 endfunction()

@@ -2,11 +2,19 @@
 
 ## 📖 概述
 
-`qtcommon.cmake` 是一个 CMake 公共配置和工具函数库，提供了统一的编译配置、库构建、测试程序构建等功能。此模块支持 Qt6 和 Qt5，并提供了跨平台的自动打包功能。
+`qtcommon.cmake` 是一个 CMake 公共配置和工具函数库，提供了统一的编译配置、库构建、测试程序构建、以及完善的打包功能。此模块支持 Qt6 和 Qt5，并提供了跨平台的自动打包功能。
+
+## 📚 文档索引
+
+- [快速开始](#-快速开始) - 基本使用方法
+- [核心功能](#-核心功能) - 主要功能列表
+- [打包完全指南](./PACKAGING.md) - **详细的单项目和多项目打包文档**
+- [函数参考](#-函数参考) - 所有可用函数的详细说明
+- [最佳实践](#-最佳实践) - 使用建议和技巧
 
 ## 🚀 快速开始
 
-### 基本使用
+### 基本使用（可执行程序）
 
 在 `CMakeLists.txt` 中包含此模块：
 
@@ -16,6 +24,71 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/qtcommon.cmake)
 get_src_include()
 cpp_execute(${PROJECT_NAME})
 setup_qt(${PROJECT_NAME})
+```
+
+### 自动打包（推荐）
+
+添加 `DEPLOY` 选项实现一键打包：
+
+```cmake
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/qtcommon.cmake)
+
+get_src_include()
+cpp_execute(${PROJECT_NAME})
+setup_qt(${PROJECT_NAME} DEPLOY)  # 自动打包所有依赖
+```
+
+**详细打包说明请查看 [PACKAGING.md](./PACKAGING.md)**
+
+### 库编译示例
+
+**编译静态库**：
+```cmake
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/qtcommon.cmake)
+
+get_src_include()
+cpp_library(mylib)
+
+# 构建静态库
+# cmake -S . -B build -DMYLIB_SHARED=OFF
+# cmake --build build
+```
+
+**编译动态库**：
+```cmake
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/qtcommon.cmake)
+
+get_src_include()
+cpp_library(mylib)
+
+# 构建动态库（默认）
+# cmake -S . -B build
+# cmake --build build
+```
+
+**同时编译库和可执行程序**：
+```cmake
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/qtcommon.cmake)
+
+# 编译库
+get_src_include()
+cpp_library(mylib)
+
+# 编译可执行程序（链接库）
+get_src_include()
+cpp_execute(myapp mylib)
+```
+
+**使用外部库**：
+```cmake
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/qtcommon.cmake)
+
+get_src_include()
+cpp_execute(myapp)
+
+# 查找并链接外部库
+find_and_link_library(myapp OpenCV REQUIRED)
+find_and_link_library(myapp Boost REQUIRED COMPONENTS system filesystem)
 ```
 
 ## 📚 主要功能
@@ -300,7 +373,7 @@ cpp_library(<name>)
 
 **控制选项**：
 - `${NAME}_SHARED`: 控制库的类型
-  - `ON`: 构建动态库（.dll, .so）
+  - `ON`: 构建动态库（.dll, .so, .dylib）
   - `OFF`: 构建静态库（.lib, .a）
 - 可通过 `cmake -DXLOG_SHARED=OFF` 来控制
 
@@ -309,27 +382,193 @@ cpp_library(<name>)
 - 应用统一的 C++ 配置
 - 配置安装规则（库文件和头文件）
 - 支持静态库和动态库切换
+- 自动生成 CMake 配置文件（支持 `find_package`）
+- 生成版本配置文件
+- 构建完成后显示库文件位置和常用命令
+
+**示例**：
+```cmake
+# 在 CMakeLists.txt 中使用
+get_src_include()
+cpp_library(mylib)
+
+# 构建动态库（默认）
+cmake -S . -B build
+cmake --build build
+
+# 构建静态库
+cmake -S . -B build -DMYLIB_SHARED=OFF
+cmake --build build
+```
+
+**输出位置**：
+- Windows: `bin/mylib.dll` (动态库) 或 `lib/mylib.lib` (静态库)
+- Linux: `lib/libmylib.so` (动态库) 或 `lib/libmylib.a` (静态库)
+- macOS: `lib/libmylib.dylib` (动态库) 或 `lib/libmylib.a` (静态库)
+
+**安装库**：
+```bash
+# 安装到默认位置
+cmake --install build
+
+# 安装到指定位置
+cmake --install build --prefix ./install
+```
+
+**在其他项目中使用**：
+```cmake
+# 在其他项目的 CMakeLists.txt 中
+find_package(mylib REQUIRED)
+target_link_libraries(myapp PRIVATE mylib)
+```
 
 ### cpp_test 函数
 
-**功能**：创建一个使用 Google Test 框架的单元测试可执行文件
+**功能**：创建一个使用 Google Test 框架的单元测试可执行文件，并集成 CTest
 
 **用法**：
 ```cmake
-cpp_test(<name>)
+cpp_test(<name> [LIB_SRC_DIR <dir>])
 ```
 
-**功能特性**：
-- 自动安装和配置 GTest
-- 收集测试源码和库源码
-- 链接 GTest 库
-- 集成 CTest 测试发现
-- 启用测试框架
+**参数**：
+- `name`: 测试程序的目标名称（必需）
+- `LIB_SRC_DIR`: 被测试库的源码目录（可选，默认: `../`）
 
-**说明**：
-- 需要先配置 `GTEST_PATH` 环境变量
-- 测试用例会自动被 CTest 发现
-- 可使用 `ctest` 命令运行所有测试
+**功能特性**：
+- 自动查找和配置 GTest（支持多种查找方式）
+- 自动收集测试源码和头文件
+- 可选收集被测试库的源码
+- 自动链接 GTest 库
+- 自动集成 CTest（使用 `gtest_discover_tests`）
+- 自动启用测试框架（`enable_testing()`）
+
+**GTest 查找方式**：
+1. **环境变量**：设置 `GTEST_PATH` 指向 GTest 安装目录
+2. **find_package**：自动查找 CMake 包
+3. **vcpkg**：使用 `vcpkg install gtest`
+4. **手动查找**：从 `GTEST_PATH` 环境变量指定的路径查找
+
+**示例**：
+
+**基本使用**：
+```cmake
+# 在 tests/CMakeLists.txt 中
+include(${CMAKE_SOURCE_DIR}/cmake/qtcommon.cmake)
+
+# 创建测试（自动收集当前目录的测试文件）
+cpp_test(mylib_test)
+```
+
+**指定库源码目录**：
+```cmake
+# 测试项目根目录的库
+cpp_test(mylib_test LIB_SRC_DIR ${CMAKE_SOURCE_DIR})
+```
+
+**完整示例**：
+```cmake
+# 主 CMakeLists.txt
+project(MyApp LANGUAGES CXX)
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/qtcommon.cmake)
+
+# 添加测试子目录
+add_subdirectory(tests)
+
+# tests/CMakeLists.txt
+include(${CMAKE_SOURCE_DIR}/cmake/qtcommon.cmake)
+cpp_test(mylib_test LIB_SRC_DIR ${CMAKE_SOURCE_DIR})
+```
+
+**运行测试**：
+
+**使用 CTest**（推荐）：
+```bash
+# 配置项目
+cmake -S . -B build
+
+# 构建测试
+cmake --build build
+
+# 运行所有测试
+ctest --test-dir build
+
+# 运行测试（详细输出）
+ctest --test-dir build --output-on-failure -V
+
+# 运行特定测试
+ctest --test-dir build -R MyLibTest
+```
+
+**使用 CMake**：
+```bash
+# 运行测试目标
+cmake --build build --target test
+
+# 或
+cmake --build build -t test
+```
+
+**使用可执行文件**：
+```bash
+# 直接运行测试可执行文件
+./build/tests/mylib_test
+
+# 或 Windows
+.\build\tests\Release\mylib_test.exe
+```
+
+**测试输出示例**：
+```
+Test project D:/Document/Qt/Test/TestApp/build
+    Start 1: MyLibTest.AddTest
+1/4 Test #1: MyLibTest.AddTest ................   Passed    0.01 sec
+    Start 2: MyLibTest.MultiplyTest
+2/4 Test #2: MyLibTest.MultiplyTest ..........   Passed    0.01 sec
+    Start 3: MyLibTest.GetVersionTest
+3/4 Test #3: MyLibTest.GetVersionTest ........   Passed    0.01 sec
+    Start 4: MyLibTestSuite.FixtureTest
+4/4 Test #4: MyLibTestSuite.FixtureTest ......   Passed    0.01 sec
+
+100% tests passed, 0 tests failed out of 4
+```
+
+**设置 GTest 路径**：
+
+**Windows**：
+```powershell
+# 设置环境变量
+$env:GTEST_PATH="C:\path\to\gtest"
+
+# 或使用 vcpkg
+vcpkg install gtest:x64-windows
+```
+
+**Linux/macOS**：
+```bash
+# 设置环境变量
+export GTEST_PATH=/usr/local
+
+# 或安装系统包
+sudo apt-get install libgtest-dev  # Ubuntu/Debian
+brew install googletest            # macOS
+```
+
+**vcpkg**（推荐）：
+```bash
+# 安装 GTest
+vcpkg install gtest
+
+# 配置 CMake
+cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=[vcpkg root]/scripts/buildsystems/vcpkg.cmake
+```
+
+**注意事项**：
+- 测试文件应放在 `tests/` 目录或测试子目录中
+- 测试文件应包含 `gtest/gtest.h` 头文件
+- 使用 `TEST` 或 `TEST_F` 宏定义测试用例
+- 测试会自动被 CTest 发现，无需手动注册
+- 如果未找到 GTest，配置会失败并给出提示
 
 ### get_env_with_default 宏
 
@@ -366,6 +605,107 @@ check_required_env(<var_name>)
 **说明**：
 - 如果环境变量未设置，会立即终止 CMake 配置
 - 用于确保必需的配置已设置
+
+### find_and_link_library 函数
+
+**功能**：统一查找和链接外部库，支持多种查找方式
+
+**用法**：
+```cmake
+find_and_link_library(<target> <lib_name> [METHOD <method>] [COMPONENTS <comp1> <comp2> ...] [REQUIRED])
+```
+
+**参数**：
+- `target`: 目标名称（必需，必须先创建目标）
+- `lib_name`: 库名称（必需）
+- `METHOD`: 查找方法（可选）
+  - `AUTO`: 自动选择（默认，优先 find_package，然后 pkg-config，最后手动）
+  - `CMAKE`: 使用 `find_package`（CMake 包）
+  - `PKG`: 使用 `pkg-config`（Linux/macOS）
+  - `MANUAL`: 手动指定路径（需要环境变量）
+- `COMPONENTS`: 库组件列表（可选，用于 find_package）
+- `REQUIRED`: 如果未找到则报错（可选）
+
+**环境变量支持**（用于 MANUAL 方法）：
+- `${LIB_NAME}_PATH`: 库的安装路径（例如：`OPENCV_PATH=/path/to/opencv`）
+- `${LIB_NAME}_INCLUDE_PATH`: 头文件路径（可选，默认从 `${LIB_NAME}_PATH/include` 查找）
+
+**功能特性**：
+- 自动选择最佳查找方式
+- 支持 CMake 包（find_package）
+- 支持 pkg-config（Linux/macOS）
+- 支持手动指定路径（通过环境变量）
+- 自动链接库和头文件
+- 支持组件库（如 Boost）
+- 彩色输出，显示查找状态
+
+**示例**：
+
+**使用 find_package（推荐）**：
+```cmake
+# 基本使用
+find_and_link_library(myapp OpenCV REQUIRED)
+
+# 带组件的库（如 Boost）
+find_and_link_library(myapp Boost REQUIRED COMPONENTS system filesystem thread)
+
+# 指定方法
+find_and_link_library(myapp OpenCV METHOD CMAKE REQUIRED)
+```
+
+**使用 pkg-config（Linux/macOS）**：
+```cmake
+# 自动使用 pkg-config（如果 find_package 失败）
+find_and_link_library(myapp opencv REQUIRED)
+
+# 显式指定使用 pkg-config
+find_and_link_library(myapp opencv METHOD PKG REQUIRED)
+```
+
+**手动指定路径**：
+```bash
+# 设置环境变量
+export OPENCV_PATH=/usr/local/opencv
+export OPENCV_INCLUDE_PATH=/usr/local/opencv/include
+
+# 或 Windows PowerShell
+$env:OPENCV_PATH="C:\opencv"
+$env:OPENCV_INCLUDE_PATH="C:\opencv\include"
+```
+
+```cmake
+# 在 CMakeLists.txt 中使用
+find_and_link_library(myapp OpenCV METHOD MANUAL REQUIRED)
+```
+
+**完整示例**：
+```cmake
+# CMakeLists.txt
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/qtcommon.cmake)
+
+get_src_include()
+cpp_execute(myapp)
+
+# 查找并链接 OpenCV
+find_and_link_library(myapp OpenCV REQUIRED)
+
+# 查找并链接 Boost（带组件）
+find_and_link_library(myapp Boost REQUIRED COMPONENTS system filesystem)
+
+# 查找并链接自定义库（手动路径）
+find_and_link_library(myapp mylib METHOD MANUAL)
+```
+
+**查找顺序**（AUTO 方法）：
+1. 尝试 `find_package`（CMake 包）
+2. 如果失败且非 Windows，尝试 `pkg-config`
+3. 如果失败，尝试从环境变量手动查找
+
+**注意事项**：
+- 必须先创建目标（`add_executable` 或 `add_library`）再调用
+- `REQUIRED` 选项确保库存在，否则构建失败
+- 手动方法需要设置相应的环境变量
+- 库名称区分大小写
 
 ## 🎨 颜色输出支持
 
@@ -441,6 +781,122 @@ setup_qt(my_app NO_WIN32)
 ## 📄 许可证
 
 此模块为项目内部使用，请遵循项目许可证。
+
+## 🧪 自动测试
+
+### 测试脚本
+
+项目提供了自动测试脚本，可以验证 CMake 配置和构建功能。
+
+**PowerShell 脚本（Windows）**：
+```powershell
+# 快速测试（配置和构建）
+.\test.ps1 quick
+
+# 完整测试（包括功能验证）
+.\test.ps1 all
+
+# 仅配置测试
+.\test.ps1 config
+
+# 仅构建测试
+.\test.ps1 build
+```
+
+**Bash 脚本（Linux/macOS）**：
+```bash
+# 快速测试（配置和构建）
+./test.sh quick
+
+# 完整测试（包括功能验证）
+./test.sh all
+
+# 仅配置测试
+./test.sh config
+
+# 仅构建测试
+./test.sh build
+```
+
+**CMake 测试目标**：
+```bash
+# 运行所有测试
+cmake --build build --target run_tests
+
+# 快速测试
+cmake --build build --target test_quick
+
+# 配置测试
+cmake --build build --target test_config
+
+# 构建测试
+cmake --build build --target test_build
+```
+
+**CMake 脚本方式**：
+```bash
+# 运行所有测试
+cmake -P cmake/run_tests.cmake
+
+# 快速测试
+cmake -DTEST_MODE=quick -P cmake/run_tests.cmake
+
+# 配置测试
+cmake -DTEST_MODE=config -P cmake/run_tests.cmake
+
+# 构建测试
+cmake -DTEST_MODE=build -P cmake/run_tests.cmake
+```
+
+### 测试内容
+
+**快速测试（quick）**：
+- CMake 配置测试
+- 构建测试
+- 可执行文件检查
+
+**完整测试（all）**：
+- CMake 配置测试
+- 构建测试
+- 功能验证测试
+- 清理测试
+
+**功能验证测试包括**：
+- `compile_commands.json` 生成检查
+- `platforms` 插件复制检查（Windows）
+- 其他功能验证
+
+### 测试输出示例
+
+```
+============================================================================
+自动测试脚本
+============================================================================
+测试模式: quick
+构建目录: build-test
+
+============================================================================
+测试组 1: CMake 配置测试
+============================================================================
+测试 1 : CMake 配置 (Visual Studio x64)
+  ✓ 通过
+
+============================================================================
+测试组 2: 构建测试
+============================================================================
+测试 2 : 构建项目 (Release)
+  ✓ 通过
+  ✓ 可执行文件存在: bin\TestApp.exe
+
+============================================================================
+测试结果汇总
+============================================================================
+总测试数: 3
+通过: 3
+失败: 0
+
+✓ 所有测试通过！
+```
 
 ## 📞 支持
 
